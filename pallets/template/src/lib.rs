@@ -18,6 +18,28 @@ mod benchmarking;
 pub mod pallet {
 	use frame_support::pallet_prelude::*;
 	use frame_system::pallet_prelude::*;
+	use scale_info::prelude::vec;
+
+	#[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+	pub struct DepositData<AccountId> {
+		asset_id: u128,
+		amount: u128,
+		beneficiary: AccountId
+	}
+
+	#[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+	pub struct DepositWithSignature<AccountId> {
+		deposit_data: DepositData<AccountId>,
+		signature: BoundedVec<u8, AccountLimit>
+	}
+
+	#[derive(Clone, Copy, PartialEq, Eq, Encode, Decode, MaxEncodedLen)]
+	pub struct AccountLimit;
+	impl Get<u32> for AccountLimit {
+		fn get() -> u32 {
+			5 // TODO: Arbitrary value
+		}
+	}
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(super) trait Store)]
@@ -37,6 +59,16 @@ pub mod pallet {
 	// Learn more about declaring storage items:
 	// https://docs.substrate.io/main-docs/build/runtime-storage/#declaring-storage-items
 	pub type Something<T> = StorageValue<_, u32>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn get_unverifed_block)]
+	pub(super) type UnverifiedSignature<T: Config> =
+	StorageMap<_, Blake2_128Concat, T::BlockNumber, BoundedVec<DepositWithSignature<T::AccountId>, AccountLimit>, ValueQuery>;
+
+	// All Relayers
+	#[pallet::storage]
+	#[pallet::getter(fn get_all_relayers)]
+	pub(super) type Relayers<T: Config> = StorageValue<_, BoundedVec<T::AccountId, AccountLimit>, ValueQuery>;
 
 	// Pallets use events to inform users when important changes are made.
 	// https://docs.substrate.io/main-docs/build/events-errors/
@@ -65,38 +97,24 @@ pub mod pallet {
 		/// An example dispatchable that takes a singles value as a parameter, writes the value to
 		/// storage and emits an event. This function must be dispatched by a signed extrinsic.
 		#[pallet::weight(10_000 + T::DbWeight::get().writes(1).ref_time())]
-		pub fn do_something(origin: OriginFor<T>, something: u32) -> DispatchResult {
+		pub fn submit_unverified_signature(origin: OriginFor<T>, deposit_with_signature: DepositWithSignature<T::AccountId>) -> DispatchResult {
 			// Check that the extrinsic was signed and get the signer.
 			// This function will return an error if the extrinsic is not signed.
 			// https://docs.substrate.io/main-docs/build/origins/
-			let who = ensure_signed(origin)?;
-
-			// Update storage.
-			<Something<T>>::put(something);
-
-			// Emit an event.
-			Self::deposit_event(Event::SomethingStored { something, who });
-			// Return a successful DispatchResultWithPostInfo
-			Ok(())
-		}
-
-		/// An example dispatchable that may throw a custom error.
-		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(1,1).ref_time())]
-		pub fn cause_error(origin: OriginFor<T>) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
-
-			// Read a value from storage.
-			match <Something<T>>::get() {
-				// Return an error if the value has not been set.
-				None => return Err(Error::<T>::NoneValue.into()),
-				Some(old) => {
-					// Increment the value read from storage; will error in the event of overflow.
-					let new = old.checked_add(1).ok_or(Error::<T>::StorageOverflow)?;
-					// Update the value in storage with the incremented result.
-					<Something<T>>::put(new);
-					Ok(())
-				},
+			let caller = ensure_signed(origin)?;
+			let relayers = <Relayers<T>>::get();
+			ensure!(relayers.contains(&caller), Error::<T>::NoneValue);
+			let current_block_number: T::BlockNumber = <frame_system::Pallet<T>>::block_number();
+			let mut deposits = <UnverifiedSignature<T>>::get(current_block_number);
+			if deposits.is_empty() {
+				<UnverifiedSignature<T>>::insert(current_block_number, BoundedVec::try_from(vec![deposit_with_signature]).unwrap());
+			} else {
+				deposits.try_push(deposit_with_signature);
+				 <UnverifiedSignature<T>>::insert(current_block_number, deposits);
 			}
+			// Emit an event.
+			//Self::deposit_event(Event::SomethingStored { something, who });
+			Ok(())
 		}
 	}
 }
